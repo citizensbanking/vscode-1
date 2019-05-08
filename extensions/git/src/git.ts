@@ -306,6 +306,8 @@ function getGitErrorCode(stderr: string): string | undefined {
 		return GitErrorCodes.BranchAlreadyExists;
 	} else if (/'.+' is not a valid branch name/.test(stderr)) {
 		return GitErrorCodes.InvalidBranchName;
+	} else if (/Please,? commit your changes or stash them/.test(stderr)) {
+		return GitErrorCodes.DirtyWorkTree;
 	}
 
 	return undefined;
@@ -349,7 +351,7 @@ export class Git {
 		await mkdirp(parentPath);
 
 		try {
-			await this.exec(parentPath, ['clone', url, folderPath], { cancellationToken });
+			await this.exec(parentPath, ['clone', url.includes(' ') ? encodeURI(url) : url, folderPath], { cancellationToken });
 		} catch (err) {
 			if (err.stderr) {
 				err.stderr = err.stderr.replace(/^Cloning.+$/m, '').trim();
@@ -1201,7 +1203,7 @@ export class Repository {
 	}
 
 	async branch(name: string, checkout: boolean, ref?: string): Promise<void> {
-		const args = checkout ? ['checkout', '-q', '-b', name] : ['branch', '-q', name];
+		const args = checkout ? ['checkout', '-q', '-b', name, '--no-track'] : ['branch', '-q', name];
 
 		if (ref) {
 			args.push(ref);

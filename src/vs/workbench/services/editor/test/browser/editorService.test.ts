@@ -8,7 +8,7 @@ import { IEditorModel } from 'vs/platform/editor/common/editor';
 import { URI } from 'vs/base/common/uri';
 import { BaseEditor } from 'vs/workbench/browser/parts/editor/baseEditor';
 import { EditorInput, EditorOptions, IFileEditorInput, IEditorInput } from 'vs/workbench/common/editor';
-import { workbenchInstantiationService, TestStorageService } from 'vs/workbench/test/workbenchTestServices';
+import { workbenchInstantiationService, TestStorageService, NullFileSystemProvider } from 'vs/workbench/test/workbenchTestServices';
 import { ResourceEditorInput } from 'vs/workbench/common/editor/resourceEditorInput';
 import { TestThemeService } from 'vs/platform/theme/test/common/testThemeService';
 import { EditorService, DelegatingEditorService } from 'vs/workbench/services/editor/browser/editorService';
@@ -27,6 +27,8 @@ import { EditorServiceImpl } from 'vs/workbench/browser/parts/editor/editor';
 import { CancellationToken } from 'vs/base/common/cancellation';
 import { timeout } from 'vs/base/common/async';
 import { toResource } from 'vs/base/test/common/utils';
+import { IFileService } from 'vs/platform/files/common/files';
+import { Disposable } from 'vs/base/common/lifecycle';
 
 export class TestEditorControl extends BaseEditor {
 
@@ -52,7 +54,7 @@ export class TestEditorInput extends EditorInput implements IFileEditorInput {
 	resolve(): Promise<IEditorModel> { return !this.fails ? Promise.resolve(null) : Promise.reject(new Error('fails')); }
 	matches(other: TestEditorInput): boolean { return other && other.resource && this.resource.toString() === other.resource.toString() && other instanceof TestEditorInput; }
 	setEncoding(encoding: string) { }
-	getEncoding(): string { return null; }
+	getEncoding(): string { return null!; }
 	setPreferredEncoding(encoding: string) { }
 	getResource(): URI { return this.resource; }
 	setForceOpenAsBinary(): void { }
@@ -62,6 +64,14 @@ export class TestEditorInput extends EditorInput implements IFileEditorInput {
 	dispose(): void {
 		super.dispose();
 		this.gotDisposed = true;
+	}
+}
+
+class FileServiceProvider extends Disposable {
+	constructor(scheme: string, @IFileService fileService: IFileService) {
+		super();
+
+		this._register(fileService.registerProvider(scheme, new NullFileSystemProvider()));
 	}
 }
 
@@ -76,7 +86,7 @@ suite('Editor service', () => {
 	test('basics', function () {
 		const partInstantiator = workbenchInstantiationService();
 
-		const part = partInstantiator.createInstance(EditorPart, 'id', false);
+		const part = partInstantiator.createInstance(EditorPart);
 		part.create(document.createElement('div'));
 		part.layout(400, 300);
 
@@ -120,7 +130,7 @@ suite('Editor service', () => {
 				assert.equal(visibleEditorChangeEventCounter, 1);
 
 				// Close input
-				return editor.group!.closeEditor(input).then(() => {
+				return editor!.group!.closeEditor(input).then(() => {
 					assert.equal(didCloseEditorListenerCounter, 1);
 					assert.equal(activeEditorChangeEventCounter, 2);
 					assert.equal(visibleEditorChangeEventCounter, 2);
@@ -149,7 +159,7 @@ suite('Editor service', () => {
 	test('openEditors() / replaceEditors()', function () {
 		const partInstantiator = workbenchInstantiationService();
 
-		const part = partInstantiator.createInstance(EditorPart, 'id', false);
+		const part = partInstantiator.createInstance(EditorPart);
 		part.create(document.createElement('div'));
 		part.layout(400, 300);
 
@@ -249,9 +259,23 @@ suite('Editor service', () => {
 		assert(input instanceof UntitledEditorInput);
 
 		// Untyped Input (untitled with file path)
-		input = service.createInput({ filePath: '/some/path.txt', options: { selection: { startLineNumber: 1, startColumn: 1 } } });
+		input = service.createInput({ resource: URI.file('/some/path.txt'), forceUntitled: true, options: { selection: { startLineNumber: 1, startColumn: 1 } } });
 		assert(input instanceof UntitledEditorInput);
 		assert.ok((input as UntitledEditorInput).hasAssociatedFilePath);
+
+		// Untyped Input (untitled with untitled resource)
+		input = service.createInput({ resource: URI.parse('untitled://Untitled-1'), forceUntitled: true, options: { selection: { startLineNumber: 1, startColumn: 1 } } });
+		assert(input instanceof UntitledEditorInput);
+		assert.ok(!(input as UntitledEditorInput).hasAssociatedFilePath);
+
+		// Untyped Input (untitled with custom resource)
+		const provider = instantiationService.createInstance(FileServiceProvider, 'untitled-custom');
+
+		input = service.createInput({ resource: URI.parse('untitled-custom://some/path'), forceUntitled: true, options: { selection: { startLineNumber: 1, startColumn: 1 } } });
+		assert(input instanceof UntitledEditorInput);
+		assert.ok((input as UntitledEditorInput).hasAssociatedFilePath);
+
+		provider.dispose();
 	});
 
 	test('delegate', function (done) {
@@ -290,7 +314,7 @@ suite('Editor service', () => {
 	test('close editor does not dispose when editor opened in other group', function () {
 		const partInstantiator = workbenchInstantiationService();
 
-		const part = partInstantiator.createInstance(EditorPart, 'id', false);
+		const part = partInstantiator.createInstance(EditorPart);
 		part.create(document.createElement('div'));
 		part.layout(400, 300);
 
@@ -329,7 +353,7 @@ suite('Editor service', () => {
 	test('open to the side', function () {
 		const partInstantiator = workbenchInstantiationService();
 
-		const part = partInstantiator.createInstance(EditorPart, 'id', false);
+		const part = partInstantiator.createInstance(EditorPart);
 		part.create(document.createElement('div'));
 		part.layout(400, 300);
 
@@ -347,13 +371,13 @@ suite('Editor service', () => {
 				return service.openEditor(input1, { pinned: true, preserveFocus: true }, SIDE_GROUP).then(editor => {
 					assert.equal(part.activeGroup, rootGroup);
 					assert.equal(part.count, 2);
-					assert.equal(editor.group, part.groups[1]);
+					assert.equal(editor!.group, part.groups[1]);
 
 					// Open to the side uses existing neighbour group if any
 					return service.openEditor(input2, { pinned: true, preserveFocus: true }, SIDE_GROUP).then(editor => {
 						assert.equal(part.activeGroup, rootGroup);
 						assert.equal(part.count, 2);
-						assert.equal(editor.group, part.groups[1]);
+						assert.equal(editor!.group, part.groups[1]);
 					});
 				});
 			});
@@ -363,7 +387,7 @@ suite('Editor service', () => {
 	test('active editor change / visible editor change events', async function () {
 		const partInstantiator = workbenchInstantiationService();
 
-		const part = partInstantiator.createInstance(EditorPart, 'id', false);
+		const part = partInstantiator.createInstance(EditorPart);
 		part.create(document.createElement('div'));
 		part.layout(400, 300);
 
@@ -403,7 +427,7 @@ suite('Editor service', () => {
 
 		// 1.) open, open same, open other, close
 		let editor = await service.openEditor(input, { pinned: true });
-		const group = editor.group!;
+		const group = editor!.group!;
 		assertActiveEditorChangedEvent(true);
 		assertVisibleEditorsChangedEvent(true);
 
@@ -573,7 +597,7 @@ suite('Editor service', () => {
 	test('openEditor returns NULL when opening fails or is inactive', async function () {
 		const partInstantiator = workbenchInstantiationService();
 
-		const part = partInstantiator.createInstance(EditorPart, 'id', false);
+		const part = partInstantiator.createInstance(EditorPart);
 		part.create(document.createElement('div'));
 		part.layout(400, 300);
 

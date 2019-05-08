@@ -7,10 +7,11 @@ import * as os from 'os';
 import * as path from 'vs/base/common/path';
 import * as platform from 'vs/base/common/platform';
 import * as pty from 'node-pty';
+import * as fs from 'fs';
 import { Event, Emitter } from 'vs/base/common/event';
-import { ITerminalChildProcess } from 'vs/workbench/contrib/terminal/node/terminal';
+import { getWindowsBuildNumber } from 'vs/workbench/contrib/terminal/node/terminal';
 import { IDisposable } from 'vs/base/common/lifecycle';
-import { IShellLaunchConfig } from 'vs/workbench/contrib/terminal/common/terminal';
+import { IShellLaunchConfig, ITerminalChildProcess } from 'vs/workbench/contrib/terminal/common/terminal';
 import { exec } from 'child_process';
 
 export class TerminalProcess implements ITerminalChildProcess, IDisposable {
@@ -50,7 +51,15 @@ export class TerminalProcess implements ITerminalChildProcess, IDisposable {
 		}
 
 		this._initialCwd = cwd;
-		const useConpty = windowsEnableConpty && process.platform === 'win32' && this._getWindowsBuildNumber() >= 18309;
+
+		// Only use ConPTY when the client is non WoW64 (see #72190) and the Windows build number is at least 18309 (for
+		// stability/performance reasons)
+		const is32ProcessOn64Windows = process.env.hasOwnProperty('PROCESSOR_ARCHITEW6432');
+		const useConpty = windowsEnableConpty &&
+			process.platform === 'win32' &&
+			!is32ProcessOn64Windows &&
+			getWindowsBuildNumber() >= 18309;
+
 		const options: pty.IPtyForkOptions = {
 			name: shellName,
 			cwd,
@@ -103,15 +112,6 @@ export class TerminalProcess implements ITerminalChildProcess, IDisposable {
 		this._onProcessExit.dispose();
 		this._onProcessIdReady.dispose();
 		this._onProcessTitleChanged.dispose();
-	}
-
-	private _getWindowsBuildNumber(): number {
-		const osVersion = (/(\d+)\.(\d+)\.(\d+)/g).exec(os.release());
-		let buildNumber: number = 0;
-		if (osVersion && osVersion.length === 4) {
-			buildNumber = parseInt(osVersion[3]);
-		}
-		return buildNumber;
 	}
 
 	private _setupTitlePolling() {
@@ -196,18 +196,33 @@ export class TerminalProcess implements ITerminalChildProcess, IDisposable {
 	}
 
 	public getCwd(): Promise<string> {
-		if (platform.isWindows) {
+		if (platform.isMacintosh) {
 			return new Promise<string>(resolve => {
-				resolve(this._initialCwd);
+				exec('lsof -p ' + this._ptyProcess.pid + ' | grep cwd', (error, stdout, stderr) => {
+					if (stdout !== '') {
+						resolve(stdout.substring(stdout.indexOf('/'), stdout.length - 1));
+					}
+				});
+			});
+		}
+
+		if (platform.isLinux) {
+			return new Promise<string>(resolve => {
+				fs.readlink('/proc/' + this._ptyProcess.pid + '/cwd', (err, linkedstr) => {
+					if (err) {
+						resolve(this._initialCwd);
+					}
+					resolve(linkedstr);
+				});
 			});
 		}
 
 		return new Promise<string>(resolve => {
-			exec('lsof -p ' + this._ptyProcess.pid + ' | grep cwd', (error, stdout, stderr) => {
-				if (stdout !== '') {
-					resolve(stdout.substring(stdout.indexOf('/'), stdout.length - 1));
-				}
-			});
+			resolve(this._initialCwd);
 		});
+	}
+
+	public getLatency(): Promise<number> {
+		return Promise.resolve(0);
 	}
 }
